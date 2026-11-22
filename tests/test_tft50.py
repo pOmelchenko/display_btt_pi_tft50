@@ -311,6 +311,70 @@ class InstallPlanTests(unittest.TestCase):
         tft50.rollback_transaction(first_backup)
         self.assertEqual(second.read_text(), self.original)
 
+    def install_entry(self, entry, backup):
+        changes, keep, kernel, module, expected, _ = tft50.plan_install(self.build, entry)
+        tft50.stage_transaction(changes, backup, keep, kernel, expected)
+        tft50.apply_transaction(backup)
+        self.selected = module
+        return module
+
+    def test_older_rollback_leaves_both_entries_intact_until_shared_files_are_free(self):
+        original = self.original.replace(' ' + self.stock_rel, '')
+        (self.esp / self.stock_rel.lstrip('/')).unlink()
+        second = self.entry.with_name('second.conf')
+        self.entry.write_text(original)
+        second.write_text(original)
+        first_backup, second_backup = self.root / 'first', self.root / 'second'
+        module = self.install_entry(self.entry, first_backup)
+        self.install_entry(second, second_backup)
+        overlay = self.esp / tft50.overlay_paths(second.read_text())[-1].lstrip('/')
+
+        def installed_files():
+            return {p: p.read_bytes() for p in self.esp.rglob('*') if p.is_file()}
+
+        before = installed_files()
+        with self.assertRaisesRegex(ValueError, 'second.conf'):
+            tft50.rollback_transaction(first_backup)
+        self.assertEqual(installed_files(), before)
+        self.assertEqual(module.read_bytes(), b'module')
+        tft50.rollback_transaction(second_backup)
+        self.assertEqual(second.read_text(), original)
+        self.assertEqual(overlay.read_bytes(), b'display')
+        tft50.rollback_transaction(first_backup)
+        self.assertFalse(overlay.exists())
+        self.assertFalse(module.exists())
+        self.assertEqual(self.entry.read_text(), original)
+
+    def test_same_kernel_in_another_overlay_catalog_still_needs_shared_module(self):
+        backup = self.root / 'first'
+        module = self.install_entry(self.entry, backup)
+        display_rel = tft50.overlay_paths(self.entry.read_text())[-1]
+        other_rel = display_rel.replace('/RadxaOS/', '/CustomOS/')
+        other_overlay = self.esp / other_rel.lstrip('/')
+        other_overlay.parent.mkdir(parents=True)
+        other_overlay.write_bytes(b'display')
+        alternate = self.entry.with_name('alternate.conf')
+        alternate.write_text(self.entry.read_text().replace(display_rel, other_rel))
+        with self.assertRaisesRegex(ValueError, 'alternate.conf.*edt-ft5x06'):
+            tft50.rollback_transaction(backup)
+        self.assertEqual(module.read_bytes(), b'module')
+        alternate.write_text(alternate.read_text().replace(
+            'linux ' + self.prefix, 'linux /CustomOS/other-kernel'))
+        tft50.rollback_transaction(backup)
+        self.assertFalse(module.exists())
+        self.assertTrue(other_overlay.exists())
+
+    def test_new_recovery_entry_protects_preserved_legacy_overlay(self):
+        backup = self.root / 'first'
+        module = self.install_entry(self.entry, backup)
+        saved_rel = self.stock_rel + '.disabled'
+        other = self.entry.with_name('rescue.conf')
+        other.write_text(self.original.replace(self.stock_rel, saved_rel))
+        with self.assertRaisesRegex(ValueError, 'rescue.conf'):
+            tft50.rollback_transaction(backup)
+        self.assertEqual((self.esp / saved_rel.lstrip('/')).read_bytes(), b'stock')
+        self.assertTrue(module.exists())
+
     def test_preserved_profile_requires_pinned_bytes(self):
         active = self.esp / self.stock_rel.lstrip('/')
         active.unlink()

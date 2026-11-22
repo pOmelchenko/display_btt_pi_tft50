@@ -178,6 +178,35 @@ def apply_transaction(backup):
     verify_preserved(manifest)
 
 
+def check_shared_rollback_files(manifest):
+    records = manifest['files']
+    removed = {Path(r['path']) for r in records if r['before'] is None}
+    kernel = manifest['kernel_release']
+    module = Path('/lib/modules') / kernel / 'updates/q6a-tft50/edt-ft5x06.ko'
+    overlays = {'/' + p.relative_to(ESP).as_posix().casefold() for p in removed
+                if p.is_relative_to(ESP) and p.name.endswith(('.dtbo', '.dtbo.disabled'))}
+    if not overlays and module not in removed:
+        return
+    require(ESP.is_mount(), 'Mount the EFI system partition before rollback')
+    # Entries written by this transaction will be deleted or restored to their
+    # verified pre-install contents. Other entries retain their current references.
+    restored = {Path(r['path']) for r in records}
+    polling_profiles = {DISPLAY, 'q6a-btt-tft50-display.dtbo'}
+    for entry in (ESP / 'loader/entries').iterdir():
+        if entry.suffix.casefold() != '.conf' or entry in restored:
+            continue
+        fields = entry_fields(entry.read_text().casefold().replace('\\', '/'))
+        paths = {os.path.normpath('/' + name.lstrip('/'))
+                 for _, names in fields.get('devicetree-overlay', []) for name in names}
+        shared = paths & overlays
+        require(not shared, f'{entry.name} still uses {", ".join(sorted(shared))}; roll it back first')
+        if module in removed and any(PurePosixPath(p).name.removesuffix('.disabled') in polling_profiles
+                                     for p in paths):
+            same_kernel = any(kernel.casefold() in PurePosixPath(image).parts
+                              for _, images in fields.get('linux', []) for image in images)
+            require(not same_kernel, f'{entry.name} still needs {module.name}; roll it back first')
+
+
 def rollback_transaction(backup):
     manifest = json.loads((backup / 'transaction.json').read_text())
     # Check all targets before touching any: never overwrite a later user edit.
@@ -188,6 +217,7 @@ def rollback_transaction(backup):
         if record['before']:
             require(sha((backup / record['before']).read_bytes()) == record['before_sha256'],
                     'Corrupt rollback payload')
+    check_shared_rollback_files(manifest)
     for record in reversed(manifest['files']):
         path = Path(record['path'])
         if record['before'] is None:

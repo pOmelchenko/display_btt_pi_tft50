@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.patch -text whitespace=-blank-at-eol,-space-before-tab
+**/driver/edt-ft5x06-stock.c -text
+**/driver/GPL-2.0 -text

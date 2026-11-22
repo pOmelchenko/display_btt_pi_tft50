@@ -279,6 +279,49 @@ class InstallPlanTests(unittest.TestCase):
         self.assertEqual((catalog / 'old-display.dtbo').read_bytes(), b'old display')
         self.assertEqual((catalog / 'old-power.dtbo').read_bytes(), b'power')
 
+    def test_second_entry_migrates_from_preserved_stock_and_rolls_back_independently(self):
+        second = self.entry.with_name('second.conf')
+        second.write_text(self.original)
+        changes, keep, kernel, module, expected, _ = tft50.plan_install(self.build, self.entry)
+        first_backup = self.root / 'first'
+        tft50.stage_transaction(changes, first_backup, keep, kernel, expected)
+        tft50.apply_transaction(first_backup)
+        self.selected = module
+        first_installed = self.entry.read_bytes()
+        saved_name = self.stock_rel + '.disabled'
+        saved = self.esp / saved_name.lstrip('/')
+        redirected = second.read_bytes()
+        self.assertIn(saved_name, tft50.overlay_paths(redirected.decode()))
+
+        changes, keep, kernel, _, expected, retired = tft50.plan_install(self.build, second)
+        self.assertEqual(retired, [saved_name])  # interactive or --replace confirmation
+        self.assertEqual(keep[str(saved)], tft50.sha(b'stock'))
+        self.assertEqual(set(path for path, _ in changes),
+                         {second, second.with_name('Q6A-before-tft50-v21-second.conf')})
+        second_backup = self.root / 'second'
+        tft50.stage_transaction(changes, second_backup, keep, kernel, expected)
+        tft50.apply_transaction(second_backup)
+        self.assertEqual(tft50.overlay_paths(second.read_text()),
+                         tft50.overlay_paths(self.entry.read_text()))
+        self.assertEqual(tft50.plan_install(self.build, second)[0], [])
+        self.assertEqual(saved.read_bytes(), b'stock')
+        tft50.rollback_transaction(second_backup)
+        self.assertEqual(self.entry.read_bytes(), first_installed)
+        self.assertEqual(second.read_bytes(), redirected)
+        tft50.rollback_transaction(first_backup)
+        self.assertEqual(second.read_text(), self.original)
+
+    def test_preserved_profile_requires_pinned_bytes(self):
+        active = self.esp / self.stock_rel.lstrip('/')
+        active.unlink()
+        saved = active.with_name(active.name + '.disabled')
+        self.entry.write_text(self.original.replace(self.stock_rel, self.stock_rel + '.disabled'))
+        for data in (None, b'custom RPi7 overlay'):
+            if data is not None:
+                saved.write_bytes(data)
+            with self.subTest(data=data), self.assertRaisesRegex(ValueError, 'preserved legacy'):
+                tft50.plan_install(self.build, self.entry)
+
     def test_refuse_modified_legacy_profile(self):
         (self.esp / self.stock_rel.lstrip('/')).write_bytes(b'custom')
         with self.assertRaisesRegex(ValueError, 'Unrecognized or missing legacy'):

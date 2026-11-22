@@ -221,13 +221,20 @@ def plan_install(build, entry):
     display_rel = str(catalog / DISPLAY)
     legacy = {str(catalog / name): digest for name, digest in lock['legacy_overlays'].items()}
     paths = overlay_paths(old)
-    retired = [p for p in paths if p in legacy]
-    unrelated = [p for p in paths if p not in legacy and p != display_rel]
+    saved_profiles = {name + '.disabled': digest for name, digest in legacy.items()}
+    retired = [p for p in paths if p in legacy or p in saved_profiles]
+    unrelated = [p for p in paths if p not in retired and p != display_rel]
     updated = list(unrelated)
     insert = next((i for i, p in enumerate(paths) if p in retired or p == display_rel), len(paths))
     updated.insert(insert, display_rel)
     new = with_overlays(old, updated)
     preserved = {str(base): file_hash(base)}
+    for name in retired:
+        if name in saved_profiles:
+            saved = efi_path(ESP, name)
+            require(file_hash(saved) == saved_profiles[name],
+                    f'Unrecognized or missing preserved legacy overlay: {name}')
+            preserved[str(saved)] = saved_profiles[name]
     for name in unrelated:
         other = efi_path(ESP, name)
         preserved[str(other)] = file_hash(other)
@@ -343,7 +350,8 @@ def plan_install(build, entry):
     update(entry, new.encode(), sha(old_bytes))
     for name in moved:
         update(efi_path(ESP, name), None, legacy[name])
-    return changes, preserved, kernel, module, expected, list(moved)
+    replacements = retired + [name for name in moved if name not in retired]
+    return changes, preserved, kernel, module, expected, replacements
 
 
 def check_free_port(tree):
